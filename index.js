@@ -18,11 +18,10 @@ const transporter = nodemailer.createTransport({
   service: "gmail",
   auth: {
     user: "housereconquista@gmail.com",
-    pass: "sdvcldsouxffmtut" // El código que te pasó tu hermana
+    pass: "sdvcldsouxffmtut" 
   }
 });
 
-// Función para enviar correos
 const enviarMailConfirmacion = async (emailCliente, nombre, habitacion, monto) => {
   const mailOptions = {
     from: '"Casa Reconquista" <housereconquista@gmail.com>',
@@ -33,22 +32,22 @@ const enviarMailConfirmacion = async (emailCliente, nombre, habitacion, monto) =
         <h2 style="color: #2d3436;">¡Reserva Exitosa!</h2>
         <p>Hola <strong>${nombre}</strong>, hemos recibido tu pago correctamente.</p>
         <hr>
-        <p><strong>Detalles de la estancia:</strong></p>
+        <p><strong>Detalles:</strong></p>
         <ul>
-          <li><strong>Habitación:</strong> ${habitacion}</li>
-          <li><strong>Monto de la seña:</strong> $${monto} (ARS)</li>
+          <li><strong>Concepto:</strong> ${habitacion}</li>
+          <li><strong>Monto recibido:</strong> $${monto} (ARS)</li>
         </ul>
-        <p>¡Nos vemos pronto en Casa Reconquista!</p>
+        <p>Este correo sirve como comprobante de tu reserva.</p>
       </div>
     `
   };
   return transporter.sendMail(mailOptions);
 };
 
-// 3. Ruta para crear la preferencia (Botón de pago)
+// 3. Ruta para crear la preferencia
 app.post("/create_preference", async (req, res) => {
   try {
-    const { amountInUSD, description } = req.body;
+    const { amountInUSD, description, customer } = req.body;
     const responseDolar = await fetch("https://dolarapi.com/v1/dolares/blue");
     const datosDolar = await responseDolar.json();
     const cotizacion = datosDolar.compra; 
@@ -58,14 +57,14 @@ app.post("/create_preference", async (req, res) => {
     const result = await preference.create({
       body: {
         items: [{ title: description, quantity: 1, unit_price: amountInARS, currency_id: "ARS" }],
+        payer: { email: customer.email, name: customer.name },
         back_urls: {
-          success: "http://localhost:5173", // Luego cambiaremos esto por la web real
-          failure: "http://localhost:5173",
-          pending: "http://localhost:5173"
+          success: "https://tupagina-en-netlify.netlify.app", // Reemplaza por tu link de Netlify
+          failure: "https://tupagina-en-netlify.netlify.app",
         },
         auto_return: "approved",
-        // Aquí es donde Mercado Pago avisará del pago:
-        notification_url: "TU_URL_DE_RENDER_VA_AQUÍ/webhook" 
+        // URL de tu servidor en Render para que MP te avise del pago
+        notification_url: "https://servidor-housecheconquista.onrender.com/webhook" 
       },
     });
 
@@ -76,21 +75,30 @@ app.post("/create_preference", async (req, res) => {
   }
 });
 
-// 4. EL WEBHOOK: Donde ocurre la magia
+// 4. Webhook: Detecta el pago y manda el mail
 app.post("/webhook", async (req, res) => {
   const { query } = req;
   const topic = query.topic || query.type;
 
   if (topic === "payment") {
     const paymentId = query.id || query['data.id'];
-    console.log("💰 Pago recibido, ID:", paymentId);
-    
-    // Aquí es donde mandaremos el mail una vez que verifiquemos el pago.
-    // Por ahora enviamos un OK a Mercado Pago para que no siga reintentando.
+    try {
+      const response = await fetch(`https://api.mercadopago.com/v1/payments/${paymentId}`, {
+        headers: { Authorization: `Bearer APP_USR-5718871151573243-021417-1d7e37013b7e3a90075d5d2a77709653-310958737` }
+      });
+      const data = await response.json();
+
+      if (data.status === "approved") {
+        await enviarMailConfirmacion(
+          data.payer.email, 
+          "Huésped", 
+          data.description, 
+          data.transaction_amount
+        );
+      }
+    } catch (err) { console.error("Error Webhook:", err); }
   }
   res.sendStatus(200);
 });
 
-app.listen(3001, () => {
-  console.log("🚀 Servidor con correos listo en puerto 3001");
-});
+app.listen(3001, () => { console.log("🚀 Servidor en la nube listo"); });
