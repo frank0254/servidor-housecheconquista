@@ -2,7 +2,7 @@ const express = require("express");
 const cors = require("cors");
 const { MercadoPagoConfig, Preference } = require("mercadopago");
 const nodemailer = require("nodemailer");
-const { MongoClient } = require("mongodb"); // Nueva herramienta instalada
+const { MongoClient } = require("mongodb");
 const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
 
 const app = express();
@@ -14,7 +14,7 @@ const client = new MercadoPagoConfig({
   accessToken: "APP_USR-5718871151573243-021417-1d7e37013b7e3a90075d5d2a77709653-310958737" 
 });
 
-// 2. Enlace de MongoDB (Tu llave que copiaste)
+// 2. Enlace de MongoDB
 const mongoUri = "mongodb+srv://admin:Ge5BVDpLP4hxLCbk@cluster0.snqb1nh.mongodb.net/?appName=Cluster0";
 const dbClient = new MongoClient(mongoUri);
 
@@ -24,7 +24,7 @@ const transporter = nodemailer.createTransport({
   auth: { user: "housereconquista@gmail.com", pass: "sdvcldsouxffmtut" }
 });
 
-// Función para guardar en la base de datos
+// Función interna para guardar en la base de datos
 const guardarReserva = async (datos) => {
   try {
     await dbClient.connect();
@@ -34,13 +34,15 @@ const guardarReserva = async (datos) => {
       ...datos,
       fechaRegistro: new Date()
     });
-    console.log("✅ Reserva guardada en el historial");
+    console.log("✅ Reserva guardada en MongoDB");
   } catch (error) {
     console.error("❌ Error al guardar en DB:", error);
   }
 };
 
-// ... (Ruta /create_preference igual que antes)
+// --- RUTAS ---
+
+// Ruta para crear el pago (Frontend -> Mercado Pago)
 app.post("/create_preference", async (req, res) => {
   try {
     const { amountInUSD, description, customer } = req.body;
@@ -60,7 +62,7 @@ app.post("/create_preference", async (req, res) => {
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-// 4. Webhook actualizado: Ahora guarda datos para el Calendario y Desempeño
+// Webhook: Recibe la confirmación de pago y guarda en la base de datos
 app.post("/webhook", async (req, res) => {
   const { query } = req;
   if (query.type === "payment" || query.topic === "payment") {
@@ -72,7 +74,7 @@ app.post("/webhook", async (req, res) => {
       const data = await response.json();
 
       if (data.status === "approved") {
-        // AHORA GUARDAMOS LOS DATOS PARA TU HERMANA
+        // Guardamos los datos para el Panel de Desempeño
         await guardarReserva({
           huesped: data.payer.first_name || "Cliente",
           email: data.payer.email,
@@ -81,17 +83,34 @@ app.post("/webhook", async (req, res) => {
           metodo: "Mercado Pago"
         });
 
-        // Enviamos el mail como antes
+        // Enviamos el mail de confirmación
         await transporter.sendMail({
-          from: '"Housecheconquista" <housereconquista@gmail.com>',
+          from: '"House Reconquista" <housereconquista@gmail.com>',
           to: `housereconquista@gmail.com, ${data.payer.email}`,
           subject: `✅ Reserva Confirmada - ${data.description}`,
-          html: `<h2>¡Pago recibido!</h2><p>Monto: $${data.transaction_amount} ARS</p>`
+          html: `<h2>¡Pago recibido!</h2><p>Gracias ${data.payer.first_name}, tu reserva por <b>${data.description}</b> ha sido confirmada por $${data.transaction_amount} ARS.</p>`
         });
       }
-    } catch (err) { console.error("Error:", err); }
+    } catch (err) { console.error("Error en Webhook:", err); }
   }
   res.sendStatus(200);
 });
 
-app.listen(3001, () => { console.log("🚀 Servidor con Base de Datos listo"); });
+// NUEVA RUTA: Entrega los datos al Admin Panel de React
+app.get("/obtener-reservas", async (req, res) => {
+  try {
+    await dbClient.connect();
+    const database = dbClient.db("CasaReconquista");
+    const reservas = database.collection("reservas");
+    
+    // Traemos todo el historial ordenado por lo más nuevo
+    const listaReservas = await reservas.find({}).sort({ fechaRegistro: -1 }).toArray();
+    res.json(listaReservas);
+  } catch (error) {
+    res.status(500).json({ error: "Error al obtener datos de la base" });
+  }
+});
+
+app.listen(3001, () => { 
+  console.log("🚀 Servidor vinculado a MongoDB y listo para el Admin Panel"); 
+});
