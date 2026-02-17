@@ -17,35 +17,37 @@ const client = new MercadoPagoConfig({
 // 2. Enlace de MongoDB
 const mongoUri = "mongodb+srv://admin:Ge5BVDpLP4hxLCbk@cluster0.snqb1nh.mongodb.net/?appName=Cluster0";
 const dbClient = new MongoClient(mongoUri);
+let db;
 
-// 3. Configuración de Correos
-const transporter = nodemailer.createTransport({
-  service: "gmail",
-  auth: { user: "housereconquista@gmail.com", pass: "sdvcldsouxffmtut" }
-});
-
-// Función interna para guardar en la base de datos
-const guardarReserva = async (datos) => {
+// Conexión inicial a la base de datos
+async function connectDB() {
   try {
     await dbClient.connect();
-    const database = dbClient.db("CasaReconquista");
-    const reservas = database.collection("reservas");
-    await reservas.insertOne({
-      ...datos,
-      fechaRegistro: new Date()
-    });
-    console.log("✅ Reserva guardada en MongoDB");
+    db = dbClient.db("CasaReconquista");
+    console.log("⭐ Conectado exitosamente a MongoDB Atlas");
   } catch (error) {
-    console.error("❌ Error al guardar en DB:", error);
+    console.error("❌ Error conectando a MongoDB:", error);
   }
-};
+}
+connectDB();
+
+// 3. Configuración de Correos (Nodemailer)
+const transporter = nodemailer.createTransport({
+  service: "gmail",
+  auth: { 
+    user: "housereconquista@gmail.com", 
+    pass: "sdvcldsouxffmtut" 
+  }
+});
 
 // --- RUTAS ---
 
 // Ruta para crear el pago (Frontend -> Mercado Pago)
 app.post("/create_preference", async (req, res) => {
   try {
-    const { amountInUSD, description, customer } = req.body;
+    const { amountInUSD, description, customer, habitacion } = req.body;
+
+    // Obtener cotización del Dólar Blue para el cobro en ARS
     const responseDolar = await fetch("https://dolarapi.com/v1/dolares/blue");
     const datosDolar = await responseDolar.json();
     const amountInARS = Math.round(amountInUSD * datosDolar.compra);
@@ -53,64 +55,123 @@ app.post("/create_preference", async (req, res) => {
     const preference = new Preference(client);
     const result = await preference.create({
       body: {
-        items: [{ title: description, quantity: 1, unit_price: amountInARS, currency_id: "ARS" }],
-        payer: { email: customer.email, name: customer.name },
-        notification_url: "https://servidor-housecheconquista.onrender.com/webhook" 
+        items: [{ 
+          title: description, 
+          quantity: 1, 
+          unit_price: amountInARS, 
+          currency_id: "ARS" 
+        }],
+        payer: { 
+          email: customer.email, 
+          name: customer.name 
+        },
+        // METADATA: Aquí guardamos la info que queremos recuperar en el webhook
+        metadata: {
+          huesped_nombre: customer.name,
+          huesped_email: customer.email,
+          habitacion_reserva: habitacion,
+          monto_dolares: amountInUSD
+        },
+        notification_url: "https://servidor-housecheconquista.onrender.com/webhook",
+        back_urls: {
+          success: "https://casareconquista.com/success", // Cambia por tu URL real
+          failure: "https://casareconquista.com/rooms"
+        },
+        auto_return: "approved",
       },
     });
+
     res.json({ init_point: result.init_point });
-  } catch (error) { res.status(500).json({ error: error.message }); }
+  } catch (error) { 
+    console.error("Error al crear preferencia:", error);
+    res.status(500).json({ error: error.message }); 
+  }
 });
 
-// Webhook: Recibe la confirmación de pago y guarda en la base de datos
+// Webhook: Recibe la confirmación real de Mercado Pago
 app.post("/webhook", async (req, res) => {
   const { query } = req;
-  if (query.type === "payment" || query.topic === "payment") {
+  const topic = query.topic || query.type;
+
+  if (topic === "payment") {
     const paymentId = query.id || query['data.id'];
+    
     try {
+      // Consultamos los detalles del pago a Mercado Pago
       const response = await fetch(`https://api.mercadopago.com/v1/payments/${paymentId}`, {
         headers: { Authorization: `Bearer APP_USR-5718871151573243-021417-1d7e37013b7e3a90075d5d2a77709653-310958737` }
       });
       const data = await response.json();
 
       if (data.status === "approved") {
-        // Guardamos los datos para el Panel de Desempeño
-        await guardarReserva({
-          huesped: data.payer.first_name || "Cliente",
-          email: data.payer.email,
-          monto: data.transaction_amount,
-          habitacion: data.description,
-          metodo: "Mercado Pago"
-        });
+        // Extraemos la info de la metadata que enviamos en create_preference
+        const infoExtra = data.metadata;
 
-        // Enviamos el mail de confirmación
+        const reservaFinal = {
+          huesped: infoExtra.huesped_nombre || "Cliente",
+          email: infoExtra.huesped_email,
+          monto: data.transaction_amount, // Monto en Pesos
+          montoUSD: infoExtra.monto_dolares, // Monto en Dólares original
+          habitacion: infoExtra.habitacion_reserva,
+          fechaRegistro: new Date(),
+          metodo: "Mercado Pago",
+          paymentId: paymentId
+        };
+
+        // 1. Guardar en MongoDB
+        if (db) {
+          await db.collection("reservas").insertOne(reservaFinal);
+          console.log("✅ Reserva guardada en MongoDB");
+        }
+
+        // 2. Enviar mail de confirmación (Doble destinatario)
         await transporter.sendMail({
-          from: '"House Reconquista" <housereconquista@gmail.com>',
-          to: `housereconquista@gmail.com, ${data.payer.email}`,
-          subject: `✅ Reserva Confirmada - ${data.description}`,
-          html: `<h2>¡Pago recibido!</h2><p>Gracias ${data.payer.first_name}, tu reserva por <b>${data.description}</b> ha sido confirmada por $${data.transaction_amount} ARS.</p>`
+          from: '"Casa Reconquista" <housereconquista@gmail.com>',
+          to: `housereconquista@gmail.com, ${infoExtra.huesped_email}`,
+          subject: `✅ Reserva Confirmada - ${infoExtra.habitacion_reserva}`,
+          html: `
+            <div style="font-family: Arial, sans-serif; max-width: 600px; border: 1px solid #eee; padding: 20px;">
+              <h2 style="color: #e91e63;">¡Nueva Reserva Confirmada!</h2>
+              <p>Hola <b>${infoExtra.huesped_nombre}</b>,</p>
+              <p>Tu pago para la habitación <b>${infoExtra.habitacion_reserva}</b> ha sido procesado con éxito.</p>
+              <hr />
+              <p><b>Detalles de la operación:</b></p>
+              <ul>
+                <li>Monto total: $${data.transaction_amount} ARS</li>
+                <li>Equivalente en dólares: USD $${infoExtra.monto_dolares}</li>
+                <li>ID de pago: ${paymentId}</li>
+              </ul>
+              <p>Nos pondremos en contacto pronto para coordinar tu llegada.</p>
+              <p><i>Atentamente, el equipo de Casa Reconquista.</i></p>
+            </div>
+          `
         });
+        console.log("📧 Mails de confirmación enviados");
       }
-    } catch (err) { console.error("Error en Webhook:", err); }
+    } catch (err) { 
+      console.error("❌ Error en el proceso del Webhook:", err); 
+    }
   }
+  // Respondemos 200 siempre para que Mercado Pago no reintente el envío
   res.sendStatus(200);
 });
 
-// NUEVA RUTA: Entrega los datos al Admin Panel de React
+// Ruta para el Admin Panel: Obtiene todas las reservas guardadas
 app.get("/obtener-reservas", async (req, res) => {
   try {
-    await dbClient.connect();
-    const database = dbClient.db("CasaReconquista");
-    const reservas = database.collection("reservas");
-    
-    // Traemos todo el historial ordenado por lo más nuevo
-    const listaReservas = await reservas.find({}).sort({ fechaRegistro: -1 }).toArray();
-    res.json(listaReservas);
+    if (!db) {
+      return res.status(500).json({ error: "Base de datos no conectada" });
+    }
+    const reservasCol = db.collection("reservas");
+    const lista = await reservasCol.find({}).sort({ fechaRegistro: -1 }).toArray();
+    res.json(lista);
   } catch (error) {
-    res.status(500).json({ error: "Error al obtener datos de la base" });
+    res.status(500).json({ error: "Error al obtener datos de MongoDB" });
   }
 });
 
-app.listen(3001, () => { 
-  console.log("🚀 Servidor vinculado a MongoDB y listo para el Admin Panel"); 
+// Iniciar servidor
+const PORT = process.env.PORT || 3001;
+app.listen(PORT, () => { 
+  console.log(`🚀 Servidor corriendo en puerto ${PORT}`); 
 });
