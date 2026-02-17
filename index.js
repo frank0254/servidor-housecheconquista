@@ -107,7 +107,11 @@ app.post("/webhook", async (req, res) => {
         // Extraemos la info de la metadata que enviamos en create_preference
         const infoExtra = data.metadata;
 
+        // --- GENERAMOS EL NÚMERO DE RESERVA ALEATORIO ---
+        const nroReserva = Math.floor(100000 + Math.random() * 900000);
+
         const reservaFinal = {
+          nroReserva: nroReserva,
           huesped: infoExtra.huesped_nombre || "Cliente",
           email: infoExtra.huesped_email,
           monto: data.transaction_amount, // Monto en Pesos
@@ -121,19 +125,20 @@ app.post("/webhook", async (req, res) => {
         // 1. Guardar en MongoDB
         if (db) {
           await db.collection("reservas").insertOne(reservaFinal);
-          console.log("✅ Reserva guardada en MongoDB");
+          console.log(`✅ Reserva #${nroReserva} guardada en MongoDB`);
         }
 
         // 2. Enviar mail de confirmación (Doble destinatario)
         await transporter.sendMail({
           from: '"Casa Reconquista" <housereconquista@gmail.com>',
           to: `housereconquista@gmail.com, ${infoExtra.huesped_email}`,
-          subject: `✅ Reserva Confirmada - ${infoExtra.habitacion_reserva}`,
+          subject: `✅ Reserva #${nroReserva} Confirmada - ${infoExtra.habitacion_reserva}`,
           html: `
             <div style="font-family: Arial, sans-serif; max-width: 600px; border: 1px solid #eee; padding: 20px;">
               <h2 style="color: #e91e63;">¡Nueva Reserva Confirmada!</h2>
               <p>Hola <b>${infoExtra.huesped_nombre}</b>,</p>
               <p>Tu pago para la habitación <b>${infoExtra.habitacion_reserva}</b> ha sido procesado con éxito.</p>
+              <p>Tu número de reserva es: <b>#${nroReserva}</b></p>
               <hr />
               <p><b>Detalles de la operación:</b></p>
               <ul>
@@ -141,12 +146,12 @@ app.post("/webhook", async (req, res) => {
                 <li>Equivalente en dólares: USD $${infoExtra.monto_dolares}</li>
                 <li>ID de pago: ${paymentId}</li>
               </ul>
-              <p>Nos pondremos en contacto pronto para coordinar tu llegada.</p>
+              <p>Por favor conserva este número para tu llegada. Nos pondremos en contacto pronto.</p>
               <p><i>Atentamente, el equipo de Casa Reconquista.</i></p>
             </div>
           `
         });
-        console.log("📧 Mails de confirmación enviados");
+        console.log("📧 Mails de confirmación con Nro de Reserva enviados");
       }
     } catch (err) { 
       console.error("❌ Error en el proceso del Webhook:", err); 
